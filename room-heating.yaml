@@ -1,5 +1,6 @@
 blueprint:
   name: Room Heating (HA-owned schedule)
+  source_url: https://raw.githubusercontent.com/araines/ha-blueprints/refs/heads/main/room-heating.yaml
   description: >-
     Controls one Zigbee TRV (Moes TRV801Z / Tuya TRV602Z) from a Home Assistant
     schedule, using the TRV's own comfort / eco / antifrost presets.
