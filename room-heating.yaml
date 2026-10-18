@@ -25,15 +25,12 @@ blueprint:
     the command is sent, whether or not the TRV received it.
 
     - Every 15 minutes the TRV's local temperature calibration is nudged so
-    its reading matches the room sensor (skipped if either reading is
-    unavailable, or inside the deadband).
-
+    its reading matches the room sensor.
 
     **Create per room first:** a `schedule` helper (ON = comfort) and an
     `input_boolean` helper (override flag). Set the room's temperatures with
     the TRV's own Comfort temperature / Eco temperature number entities, and
     set its Holiday temperature (the antifrost temperature) in Zigbee2MQTT.
-
 
     To override from Home Assistant, change the temperature (not the preset).
     Unavailable window/door sensors count as closed, and an unavailable
@@ -188,19 +185,6 @@ blueprint:
           default: antifrost
           selector:
             text:
-        offset_deadband:
-          name: Calibration deadband
-          description: >-
-            Only adjust the calibration when the TRV and room sensor differ by
-            at least this much.
-          default: 0.5
-          selector:
-            number:
-              min: 0.1
-              max: 2
-              step: 0.1
-              unit_of_measurement: "°C"
-              mode: box
         override_max_hours:
           name: Maximum override duration
           description: An override ends after this long even if the schedule has not changed.
@@ -268,7 +252,6 @@ variables:
   p_comfort: !input preset_comfort
   p_eco: !input preset_eco
   p_frost: !input preset_frost
-  deadband: !input offset_deadband
   max_override_hours: !input override_max_hours
 
   trv_available: "{{ states(trv) not in ['unavailable', 'unknown'] }}"
@@ -321,9 +304,7 @@ actions:
             id: offset
           - condition: template
             value_template: >-
-              {{ room_temp is number and trv_temp is number and offset_now is number
-                 and (room_temp - trv_temp) | abs >= deadband | float(0.5)
-                 and (now() - states[offset_number].last_changed).total_seconds() > 1200 }}
+              {{ room_temp is number and trv_temp is number and offset_now is number }}
         sequence:
           - action: number.set_value
             target:
@@ -334,7 +315,7 @@ actions:
                 {% set hi = state_attr(offset_number, 'max') | float(10) %}
                 {{ ([[offset_now + room_temp - trv_temp, lo] | max, hi] | min) | round(1) }}
 
-      # 2. Someone changed the setpoint on the TRV or from Home Assistant
+      # 2. Someone changed the setpoint
       - alias: Detect a manual change
         conditions:
           - condition: trigger
