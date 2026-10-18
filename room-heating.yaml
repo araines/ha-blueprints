@@ -1,0 +1,428 @@
+blueprint:
+  name: Room Heating (HA-owned schedule)
+  description: >-
+    Controls one Zigbee TRV (Moes TRV801Z / Tuya TRV602Z) from a Home Assistant
+    schedule, using the TRV's own comfort / eco / antifrost presets.
+    The TRV's on-device schedule is not used.
+
+
+    **Behaviour**
+
+    - Nobody home, any listed window/door open, or (optional) outside
+    temperature above this room's lockout threshold: antifrost preset.
+
+    - Otherwise: schedule ON = comfort preset, schedule OFF = eco preset.
+
+    - Manual change (dial or Home Assistant temperature change): a per-room
+    override flag is set and the TRV is left alone until the schedule next
+    changes, the room goes to antifrost (away / window open / lockout), or the
+    override has lasted longer than the configured maximum.
+
+    - Every 10 minutes (and at Home Assistant start) the preset and the TRV's
+    reported setpoint are re-checked and the command is resent if either does
+    not match, so lost Zigbee commands are corrected. The setpoint is the
+    check that matters: Zigbee2MQTT reports a preset as applied as soon as
+    the command is sent, whether or not the TRV received it.
+
+    - Every 15 minutes the TRV's local temperature calibration is nudged so
+    its reading matches the room sensor (skipped if either reading is
+    unavailable, or inside the deadband).
+
+
+    **Create per room first:** a `schedule` helper (ON = comfort) and an
+    `input_boolean` helper (override flag). Set the room's temperatures with
+    the TRV's own Comfort temperature / Eco temperature number entities, and
+    set its Holiday temperature (the antifrost temperature) in Zigbee2MQTT.
+
+
+    To override from Home Assistant, change the temperature (not the preset).
+    Unavailable window/door sensors count as closed, and an unavailable
+    outside temperature means no lockout. The lockout is checked by the
+    10-minute re-check, so it takes effect within 10 minutes; while it is
+    active the room stays in antifrost, like away and open windows.
+  domain: automation
+  homeassistant:
+    min_version: 2024.10.0
+  input:
+    devices:
+      name: Room devices
+      icon: mdi:radiator
+      collapsed: false
+      input:
+        climate_entity:
+          name: Thermostat (TRV)
+          description: The TRV's climate entity.
+          selector:
+            entity:
+              multiple: false
+              domain: climate
+        room_temperature_entity:
+          name: Room temperature sensor
+          description: Sensor that measures the true room temperature.
+          selector:
+            entity:
+              multiple: false
+              domain: sensor
+        temp_offset_entity:
+          name: TRV local temperature calibration
+          description: The TRV's "Local temperature calibration" number entity.
+          selector:
+            entity:
+              multiple: false
+              domain: number
+        comfort_temperature_entity:
+          name: TRV comfort temperature
+          description: The TRV's own "Comfort temperature" number entity.
+          selector:
+            entity:
+              multiple: false
+              domain: number
+        eco_temperature_entity:
+          name: TRV eco temperature
+          description: The TRV's own "Eco temperature" number entity.
+          selector:
+            entity:
+              multiple: false
+              domain: number
+        frost_temperature_entity:
+          name: (Optional) TRV holiday (antifrost) temperature
+          description: >-
+            The TRV's own "Holiday temperature" number entity. Lets the
+            blueprint check that an antifrost command really reached the TRV.
+            Leave empty to skip that check.
+          default: ""
+          selector:
+            entity:
+              multiple: false
+              domain: number
+    control:
+      name: Schedule, presence and openings
+      icon: mdi:calendar-clock
+      collapsed: false
+      input:
+        schedule_entity:
+          name: Comfort schedule
+          description: Schedule helper. ON = comfort temperature, OFF = eco temperature.
+          selector:
+            entity:
+              multiple: false
+              domain: schedule
+        home_entity:
+          name: Home/Away
+          description: >-
+            Entity whose state is "home" when someone is home and "not_home"
+            when nobody is (for example group.home).
+          selector:
+            entity:
+              multiple: false
+              domain:
+                - group
+                - person
+        override_entity:
+          name: Manual override flag
+          description: >-
+            An input_boolean helper dedicated to this room. Turned on when the
+            TRV is changed manually and off when the override ends.
+          selector:
+            entity:
+              multiple: false
+              domain: input_boolean
+        window_entities:
+          name: (Optional) Windows / doors
+          description: >-
+            Contact sensors (or groups of them). Any one "on" puts the room in
+            antifrost.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              domain:
+                - binary_sensor
+                - group
+    lockout:
+      name: (Optional) Outside temperature lockout
+      icon: mdi:weather-sunny
+      collapsed: true
+      input:
+        outside_temperature_entity:
+          name: Outside temperature sensor
+          description: >-
+            Leave empty to disable the lockout for this room. A smoothed value
+            such as a 24 hour mean (Statistics helper on your outside
+            temperature) avoids the room flapping on a sunny afternoon.
+          default: ""
+          selector:
+            entity:
+              multiple: false
+              domain: sensor
+        lockout_above:
+          name: Lockout above
+          description: >-
+            This room stays in antifrost while the outside temperature is
+            above this value.
+          default: 16
+          selector:
+            number:
+              min: 0
+              max: 30
+              step: 0.5
+              unit_of_measurement: "°C"
+              mode: box
+    advanced:
+      name: Advanced
+      icon: mdi:cog
+      collapsed: true
+      input:
+        preset_comfort:
+          name: Comfort preset name
+          default: comfort
+          selector:
+            text:
+        preset_eco:
+          name: Eco preset name
+          default: eco
+          selector:
+            text:
+        preset_frost:
+          name: Antifrost preset name
+          default: antifrost
+          selector:
+            text:
+        offset_deadband:
+          name: Calibration deadband
+          description: >-
+            Only adjust the calibration when the TRV and room sensor differ by
+            at least this much.
+          default: 0.5
+          selector:
+            number:
+              min: 0.1
+              max: 2
+              step: 0.1
+              unit_of_measurement: "°C"
+              mode: box
+        override_max_hours:
+          name: Maximum override duration
+          description: An override ends after this long even if the schedule has not changed.
+          default: 8
+          selector:
+            number:
+              min: 1
+              max: 24
+              step: 1
+              unit_of_measurement: h
+              mode: box
+
+mode: queued
+max: 20
+max_exceeded: silent
+
+triggers:
+  - trigger: state
+    entity_id: !input climate_entity
+    attribute: temperature
+    id: setpoint
+  - trigger: state
+    entity_id: !input home_entity
+    id: home
+  - trigger: state
+    entity_id: !input schedule_entity
+    id: schedule
+  - trigger: state
+    entity_id: !input window_entities
+    id: window
+  - trigger: state
+    entity_id:
+      - !input comfort_temperature_entity
+      - !input eco_temperature_entity
+    not_from:
+      - unavailable
+      - unknown
+    not_to:
+      - unavailable
+      - unknown
+    id: temps
+  - trigger: time_pattern
+    minutes: /10
+    id: reconcile
+  - trigger: time_pattern
+    minutes: /15
+    id: offset
+  - trigger: homeassistant
+    event: start
+    id: reconcile
+
+variables:
+  trv: !input climate_entity
+  room_sensor: !input room_temperature_entity
+  offset_number: !input temp_offset_entity
+  schedule: !input schedule_entity
+  comfort_number: !input comfort_temperature_entity
+  eco_number: !input eco_temperature_entity
+  frost_number: !input frost_temperature_entity
+  home: !input home_entity
+  override: !input override_entity
+  windows: !input window_entities
+  outside: !input outside_temperature_entity
+  lockout_above: !input lockout_above
+  p_comfort: !input preset_comfort
+  p_eco: !input preset_eco
+  p_frost: !input preset_frost
+  deadband: !input offset_deadband
+  max_override_hours: !input override_max_hours
+
+  trv_available: "{{ states(trv) not in ['unavailable', 'unknown'] }}"
+  trv_preset: "{{ state_attr(trv, 'preset_mode') }}"
+  away: "{{ is_state(home, 'not_home') }}"
+  any_open: "{{ expand(windows) | selectattr('state', 'eq', 'on') | list | count > 0 }}"
+  outside_temp: "{{ states(outside) | float(none) if outside else none }}"
+  locked_out: "{{ outside_temp is number and outside_temp > lockout_above | float(99) }}"
+  desired: >-
+    {{ p_frost if (away or any_open or locked_out)
+       else (p_comfort if is_state(schedule, 'on') else p_eco) }}
+  other_preset: "{{ p_comfort if desired == p_eco else p_eco }}"
+  expected: >-
+    {{ states(comfort_number) | float(-1) if desired == p_comfort
+       else (states(eco_number) | float(-1) if desired == p_eco else -1) }}
+  trv_setpoint: "{{ state_attr(trv, 'temperature') | float(none) }}"
+  verify_target: >-
+    {{ expected if desired != p_frost
+       else (states(frost_number) | float(-1) if frost_number else -1) }}
+  setpoint_wrong: >-
+    {{ trv_setpoint is number and verify_target >= 0
+       and (trv_setpoint - verify_target) | abs >= 0.05 }}
+  override_on: "{{ is_state(override, 'on') }}"
+  override_expired: >-
+    {{ override_on and (now() - states[override].last_changed).total_seconds()
+       > max_override_hours | float(8) * 3600 }}
+  override_ends: >-
+    {{ override_on and (desired == p_frost or trigger.id == 'schedule' or override_expired) }}
+  needs_send: >-
+    {{ trv_preset != desired or override_ends
+       or (trigger.id == 'temps' and desired != p_frost)
+       or (trigger.id == 'reconcile' and setpoint_wrong) }}
+  needs_flip: >-
+    {{ override_ends or trv_preset == desired
+       or (trigger.id == 'temps' and desired != p_frost) }}
+  room_temp: "{{ states(room_sensor) | float(none) }}"
+  trv_temp: "{{ state_attr(trv, 'current_temperature') | float(none) }}"
+  offset_now: "{{ states(offset_number) | float(none) }}"
+
+actions:
+  - alias: Do nothing while the TRV is offline
+    condition: template
+    value_template: "{{ trv_available }}"
+
+  - choose:
+      # 1. Keep the TRV's temperature reading in line with the room sensor
+      - alias: Calibrate TRV to the room sensor
+        conditions:
+          - condition: trigger
+            id: offset
+          - condition: template
+            value_template: >-
+              {{ room_temp is number and trv_temp is number and offset_now is number
+                 and (room_temp - trv_temp) | abs >= deadband | float(0.5)
+                 and (now() - states[offset_number].last_changed).total_seconds() > 1200 }}
+        sequence:
+          - action: number.set_value
+            target:
+              entity_id: !input temp_offset_entity
+            data:
+              value: >-
+                {% set lo = state_attr(offset_number, 'min') | float(-10) %}
+                {% set hi = state_attr(offset_number, 'max') | float(10) %}
+                {{ ([[offset_now + room_temp - trv_temp, lo] | max, hi] | min) | round(1) }}
+
+      # 2. Someone changed the setpoint on the TRV or from Home Assistant
+      - alias: Detect a manual change
+        conditions:
+          - condition: trigger
+            id: setpoint
+          - condition: template
+            value_template: >-
+              {% set f = trigger.from_state.attributes.get('temperature') if trigger.from_state else none %}
+              {% set t = trigger.to_state.attributes.get('temperature') if trigger.to_state else none %}
+              {{ desired != p_frost and not override_on and expected >= 0
+                 and f is number and t is number
+                 and (f - expected) | abs < 0.05 and (t - expected) | abs >= 0.05
+                 and (now() - states[comfort_number].last_changed).total_seconds() > 60
+                 and (now() - states[eco_number].last_changed).total_seconds() > 60 }}
+        sequence:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: !input override_entity
+
+    # Everything else: schedule / presence / window / comfort-eco edits / periodic check
+    default:
+      - alias: End the manual override
+        if:
+          - condition: template
+            value_template: "{{ override_ends }}"
+        then:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: !input override_entity
+
+      - alias: Stop while a manual override is holding
+        condition: template
+        value_template: "{{ not override_on or override_ends }}"
+
+      # Zigbee2MQTT reports a new preset as soon as it has sent the command, so
+      # a command the TRV never received still looks applied in Home Assistant,
+      # and sending the same preset again may not reach the TRV at all. The
+      # setpoint only changes when the TRV reports it, so it is the check.
+      # A resend therefore goes through a different preset first, so that it is
+      # always a real change.
+      - alias: Send the preset, and check it reached the TRV
+        if:
+          - condition: template
+            value_template: "{{ needs_send }}"
+        then:
+          - alias: Send the preset
+            choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ needs_flip }}"
+                sequence:
+                  - action: climate.set_preset_mode
+                    target:
+                      entity_id: !input climate_entity
+                    data:
+                      preset_mode: "{{ other_preset }}"
+                  - action: climate.set_preset_mode
+                    target:
+                      entity_id: !input climate_entity
+                    data:
+                      preset_mode: "{{ desired }}"
+            default:
+              - action: climate.set_preset_mode
+                target:
+                  entity_id: !input climate_entity
+                data:
+                  preset_mode: "{{ desired }}"
+          - alias: Up to three more tries if the TRV does not report the new setpoint
+            repeat:
+              count: 3
+              sequence:
+                - alias: Wait for the TRV to report the new setpoint
+                  wait_template: >-
+                    {{ verify_target < 0 or
+                       ((state_attr(trv, 'temperature') | float(-1000)) - verify_target) | abs < 0.05 }}
+                  timeout: "00:00:45"
+                  continue_on_timeout: true
+                - alias: Not reported - send it again through another preset
+                  if:
+                    - condition: template
+                      value_template: "{{ not wait.completed }}"
+                  then:
+                    - action: climate.set_preset_mode
+                      target:
+                        entity_id: !input climate_entity
+                      data:
+                        preset_mode: "{{ other_preset }}"
+                    - action: climate.set_preset_mode
+                      target:
+                        entity_id: !input climate_entity
+                      data:
+                        preset_mode: "{{ desired }}"

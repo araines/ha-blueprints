@@ -1,0 +1,171 @@
+blueprint:
+  name: Boiler call for heat
+  description: >-
+    The single writer of the boiler thermostat. Calls for heat by raising the
+    boiler climate's target temperature, and stops the call by lowering it.
+
+
+    **A room asks for heat only when its TRV is heating and the room's real
+    temperature (from its room sensor) is below the TRV's target.** If the room
+    sensor is unavailable the TRV's own reading is used instead. A room in
+    antifrost (away, window open, outside-temperature lockout) takes part like
+    any other room, so frost protection works through the same path.
+
+
+    **Ceiling:** a room can have a ceiling temperature. At or above it the call
+    is cancelled. The call is not restarted until the room is back below
+    ceiling minus the release margin. The release is worked out from the boiler
+    target, so no helper is needed: while the boiler is not calling, a room
+    inside the release margin still blocks a new call.
+
+
+    The rooms are given as a list in the Rooms input (YAML). Re-evaluated every
+    minute, at Home Assistant start, and whenever the boiler target is changed
+    by something else. Disable any other automation that sets the boiler target.
+  domain: automation
+  homeassistant:
+    min_version: 2024.10.0
+  input:
+    boiler:
+      name: Boiler
+      icon: mdi:water-boiler
+      collapsed: false
+      input:
+        boiler_climate:
+          name: Boiler thermostat
+          description: The climate entity whose target temperature is used to call for heat.
+          selector:
+            entity:
+              multiple: false
+              domain: climate
+        call_temperature:
+          name: Call-for-heat temperature
+          description: >-
+            Target set to call for heat. Must be above the temperature of the
+            room the boiler thermostat sits in. It also acts as a backstop: the
+            boiler stops when that room reaches it.
+          default: 22
+          selector:
+            number:
+              min: 5
+              max: 35
+              step: 0.5
+              unit_of_measurement: "°C"
+              mode: box
+        idle_temperature:
+          name: No-call temperature
+          description: Target set when no room needs heat. Must be below the thermostat room's temperature.
+          default: 16
+          selector:
+            number:
+              min: 5
+              max: 35
+              step: 0.5
+              unit_of_measurement: "°C"
+              mode: box
+    rooms_section:
+      name: Rooms
+      icon: mdi:radiator
+      collapsed: false
+      input:
+        rooms:
+          name: Rooms
+          description: >-
+            One entry per TRV: `trv` (climate entity), `sensor` (the room's
+            temperature sensor) and optionally `ceiling` (°C). Rooms sharing a
+            sensor are fine.
+          default:
+            - trv: climate.bedroom_trv
+              sensor: sensor.bedroom_thermometer_temperature
+              ceiling: 22
+            - trv: climate.basement_trv_1
+              sensor: sensor.basement_temperature
+            - trv: climate.basement_trv_2
+              sensor: sensor.basement_temperature
+            - trv: climate.kitchen_trv
+              sensor: sensor.kitchen_temperature
+            - trv: climate.dining_room_trv
+              sensor: sensor.dining_room_temperature
+            - trv: climate.office_trv
+              sensor: sensor.office_temperature
+            - trv: climate.craft_room_trv
+              sensor: sensor.craft_room_temperature
+            - trv: climate.guest_room_trv
+              sensor: sensor.guest_room_temperature
+          selector:
+            object: {}
+        ceiling_release:
+          name: Ceiling release margin
+          description: A room that hit its ceiling must fall this far below it before heat is called again.
+          default: 0.5
+          selector:
+            number:
+              min: 0.1
+              max: 3
+              step: 0.1
+              unit_of_measurement: "°C"
+              mode: box
+
+mode: single
+max_exceeded: silent
+
+triggers:
+  - trigger: time_pattern
+    minutes: /1
+  - trigger: homeassistant
+    event: start
+  - trigger: state
+    entity_id: !input boiler_climate
+    attribute: temperature
+
+variables:
+  boiler: !input boiler_climate
+  call_t: !input call_temperature
+  idle_t: !input idle_temperature
+  rooms: !input rooms
+  release: !input ceiling_release
+
+  boiler_sp: "{{ state_attr(boiler, 'temperature') | float(none) }}"
+  calling_now: "{{ boiler_sp is number and boiler_sp >= (call_t | float(22) + idle_t | float(16)) / 2 }}"
+
+  status: >-
+    {% set ns = namespace(demand=[], hit=[], near=[]) %}
+    {% for r in rooms %}
+      {% set trv = r['trv'] %}
+      {% set t = states(r['sensor']) | float(none) %}
+      {% if t is none %}
+        {% set t = state_attr(trv, 'current_temperature') | float(none) %}
+      {% endif %}
+      {% set sp = state_attr(trv, 'temperature') | float(none) %}
+      {% set cap = r.get('ceiling') | float(none) %}
+      {% if t is number and sp is number and t < sp and is_state_attr(trv, 'hvac_action', 'heating') %}
+        {% set ns.demand = ns.demand + [trv] %}
+      {% endif %}
+      {% if t is number and cap is number and t >= cap %}
+        {% set ns.hit = ns.hit + [trv] %}
+      {% endif %}
+      {% if t is number and cap is number and t >= cap - release | float(0.5) %}
+        {% set ns.near = ns.near + [trv] %}
+      {% endif %}
+    {% endfor %}
+    {{ {'demand': ns.demand, 'hit': ns.hit, 'near': ns.near} }}
+
+  veto: "{{ status.hit | count > 0 or (status.near | count > 0 and not calling_now) }}"
+  want_call: "{{ status.demand | count > 0 and not veto }}"
+  target_sp: "{{ call_t | float(22) if want_call else idle_t | float(16) }}"
+
+actions:
+  - alias: Stop if the boiler thermostat is unavailable
+    condition: template
+    value_template: "{{ boiler_sp is number }}"
+
+  - alias: Stop if the boiler target is already right
+    condition: template
+    value_template: "{{ (boiler_sp - target_sp) | abs > 0.05 }}"
+
+  - alias: Set the boiler target
+    action: climate.set_temperature
+    target:
+      entity_id: !input boiler_climate
+    data:
+      temperature: "{{ target_sp }}"
