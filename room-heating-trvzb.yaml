@@ -2,13 +2,11 @@ blueprint:
   name: Room Heating (Sonoff TRVZB)
   source_url: https://raw.githubusercontent.com/araines/ha-blueprints/refs/heads/main/room-heating-trvzb.yaml
   description: >-
-    Controls one Sonoff TRVZB through Zigbee2MQTT. The comfort / eco schedule
-    lives in a Home Assistant `schedule` helper and is copied to the TRV's own
-    weekly schedule, which the TRV follows by itself in its `auto` mode. Home
-    Assistant steps in to put the TRV in `off` (the TRV's own frost protection)
-    and to put it back in `auto`. The room's temperature sensor is sent to the
-    TRV as its external temperature.
-
+    Controls a Sonoff TRVZB through Zigbee2MQTT. The schedule is copied from a
+    `schedule` helper to the TRV's onboard schedule which it follows in `auto`
+    mode. If provided, the room temperature sensor is set to the TRV as the
+    external temperature for it to use. Opening windows/doors, leaving home,
+    or if it gets too warm outside turns the TRV off.
 
     **Behaviour**
 
@@ -20,39 +18,26 @@ blueprint:
     - Otherwise the TRV follows its own schedule in `auto`: comfort temperature
     in the schedule helper's ON blocks, eco temperature the rest of the time.
 
-    - Manual change on the dial: the TRV may leave `auto` (system mode `heat`
-    holds the set temperature). It is put back in `auto` the next time the
-    schedule helper changes between on and off.
+    - Manual change on the dial: the TRV changes to `heat`, and the temperature
+    is held until the next scheduled change - then it returns to `auto`.
 
     - Whenever the schedule helper changes, the whole weekly schedule is
-    written to the TRV, all seven days, whether or not it changed. The helper
-    changes at every block boundary, so an edit reaches the TRV at the next
-    boundary at the latest, and at once if it changes the helper's next change
-    time. Nothing is done at Home Assistant start. To write the schedule
-    right now (after setting up the room, or changing the comfort / eco
-    temperatures), run this automation's actions by hand: that writes the
-    schedule and puts the TRV back in `auto`.
+    written to the TRV. This means changes to the helper are only reflected at
+    the next schedule change, not immediately.
 
     - Whenever the room temperature sensor changes, its value is written to
-    the TRV's External temperature, and the TRV's Temperature sensor is set to
-    `remote_temperature` if it was on `local_temperature`. The TRV then
-    regulates on the room sensor, so no calibration offset is needed. Leave
-    that offset at 0.
+    the TRV's External temperature and the TRV's Temperature sensor is set to
+    `remote_temperature`. If it becomes unavailable, the TRV is changed to
+    to `remote_source_offline`.
 
     - The outside temperature lockout starts and ends the moment the outside
     sensor crosses the threshold.
-
-    - The blueprint does not try to detect or repair commands the TRV never
-    received: Zigbee2MQTT reports a command as applied as soon as it is sent.
-
 
     **Schedule helper:** comfort is the ON time. A day can have at most 3
     comfort blocks, or 2 if neither starts at midnight nor ends at the end of
     the day, because the TRV holds 6 transitions a day and each day starts
     with a 00:00 one. A day with too many blocks is written without its last
-    blocks, and a warning is added to the Home Assistant log. Temperatures are
-    rounded to the TRV's 0.5 °C steps.
-
+    blocks, and a warning is added to the Home Assistant log.
 
     Unavailable window/door sensors count as closed, and an unavailable
     outside temperature means no lockout change. Set the room's frost
@@ -69,12 +54,8 @@ blueprint:
         trv_device:
           name: TRV
           description: >-
-            The TRVZB's Zigbee2MQTT device. Its climate entity, External
-            temperature number, Temperature sensor select and Weekly schedule
-            text entities (Sunday to Saturday) are found from it by name, so
-            they must still end `_external_temperature_input`,
-            `_temperature_sensor_select` and `_weekly_schedule_monday` (and so
-            on), as Zigbee2MQTT names them.
+            The TRVZB's Zigbee2MQTT device. The entities are discovered by name
+            so must be the defaults.
           selector:
             device:
               multiple: false
@@ -172,7 +153,7 @@ blueprint:
           description: >-
             This room stays in frost protection while the outside temperature
             is above this value.
-          default: 16
+          default: 18
           selector:
             number:
               min: 0
