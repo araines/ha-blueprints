@@ -339,8 +339,8 @@ actions:
             {% for day in weekdays %}
               {% set s = namespace(t=[], over=false) %}
               {% for b in (sched[day] | default([], true) | sort(attribute='from')) %}
-                {% set f = (b['from'][0:2] | int) * 60 + (b['from'][3:5] | int) %}
-                {% set e = (b['to'][0:2] | int) * 60 + (b['to'][3:5] | int) %}
+                {% set f = ((b['from'] | string)[0:2] | int) * 60 + ((b['from'] | string)[3:5] | int) %}
+                {% set e = ((b['to'] | string)[0:2] | int) * 60 + ((b['to'] | string)[3:5] | int) %}
                 {% set e = 1440 if e >= 1439 else e %}
                 {% if s.t | count > 0 and f < s.t[-1][0] %}
                   {% set f = s.t[-1][0] %}
