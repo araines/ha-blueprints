@@ -31,8 +31,8 @@ blueprint:
     TRV's Temperature sensor is set to `remote_source_offline`, so that it
     uses its own sensor.
 
-    - The outside temperature lockout is re-checked whenever the outside
-    sensor changes.
+    - The outside temperature lockout starts and ends the moment the outside
+    sensor crosses the threshold.
 
     **Schedule helper:** comfort is the ON time. A day can have at most 3
     comfort blocks, or 2 if neither starts at midnight nor ends at the end of
@@ -141,14 +141,13 @@ blueprint:
         outside_temperature_entity:
           name: Outside temperature sensor
           description: >-
-            Leave empty to disable the lockout for this room. Only the first
-            sensor chosen is used. A smoothed value such as a 24 hour mean
-            (Statistics helper on your outside temperature) avoids the room
-            flapping on a sunny afternoon.
-          default: []
+            Leave empty to disable the lockout for this room. A smoothed value
+            such as a 24 hour mean (Statistics helper on your outside
+            temperature) avoids the room flapping on a sunny afternoon.
+          default: ""
           selector:
             entity:
-              multiple: true
+              multiple: false
               domain: sensor
         lockout_above:
           name: Lockout above
@@ -168,13 +167,25 @@ mode: queued
 max: 10
 max_exceeded: silent
 
+trigger_variables:
+  outside_sensor: !input outside_temperature_entity
+  outside_limit: !input lockout_above
+
 triggers:
   - trigger: state
     entity_id: !input home_entity
   - trigger: state
     entity_id: !input window_entities
-  - trigger: state
-    entity_id: !input outside_temperature_entity
+  # The outside temperature lockout. Each of these fires when the sensor
+  # crosses the threshold. With no outside sensor both are always false.
+  - trigger: template
+    value_template: >-
+      {% set t = states(outside_sensor) | float(none) if outside_sensor else none %}
+      {{ t is number and t > outside_limit | float(99) }}
+  - trigger: template
+    value_template: >-
+      {% set t = states(outside_sensor) | float(none) if outside_sensor else none %}
+      {{ t is number and t <= outside_limit | float(99) }}
   - trigger: state
     entity_id: !input schedule_entity
     not_to:
@@ -211,9 +222,7 @@ variables:
   trv_mode: "{{ states(trv) }}"
   away: "{{ is_state(home, 'not_home') }}"
   any_open: "{{ expand(windows) | selectattr('state', 'eq', 'on') | list | count > 0 }}"
-  outside_temp: >-
-    {% set o = outside | first | default('', true) %}
-    {{ states(o) | float(none) if o else none }}
+  outside_temp: "{{ states(outside) | float(none) if outside else none }}"
   locked_out: "{{ outside_temp is number and outside_temp > lockout_above | float(99) }}"
   desired: "{{ 'off' if (away or any_open or locked_out) else 'auto' }}"
   # The schedule helper changing, or running the actions by hand (no trigger id)
