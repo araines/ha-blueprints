@@ -1,0 +1,375 @@
+blueprint:
+  name: Room Heating (Moes TRV801Z)
+  source_url: https://raw.githubusercontent.com/araines/ha-blueprints/refs/heads/main/room-heating-trv801z.yaml
+  description: >-
+    Controls a Moes TRV801Z (Tuya TRV602Z) through Zigbee2MQTT. The schedule is
+    copied from a `schedule` helper to the TRV's onboard schedule, which it
+    follows in its `auto` preset. The room temperature sensor is used to
+    calibrate the TRV's own temperature reading. Opening windows/doors, leaving
+    home, or if it gets too warm outside puts the TRV in antifrost.
+
+
+    **Behaviour**
+
+    - Nobody home, any listed window/door open, or (optional) outside
+    temperature above this room's lockout threshold: `antifrost` preset. When
+    that ends the TRV goes back to `auto`.
+
+    - Otherwise the TRV follows its own schedule in `auto`, using its own
+    Comfort / Eco temperature settings.
+
+    - Manual change on the dial: the TRV leaves `auto` (it switches to the
+    comfort / eco preset that matches the new temperature) and the temperature
+    is held until the next scheduled change - then it returns to `auto`.
+
+    - Whenever the schedule helper changes, the whole weekly schedule is
+    written to the TRV, and it is put back in `auto`. This means changes to the
+    helper are only reflected at the next schedule change, not immediately.
+    To write the schedule straight away, run this automation's actions by hand.
+
+    - Every 15 minutes the TRV's local temperature calibration is nudged so
+    its reading matches the room sensor (skipped if either reading is
+    unavailable, or inside the deadband).
+
+    - The outside temperature lockout starts and ends the moment the outside
+    sensor crosses the threshold.
+
+    - The blueprint does not try to detect or repair commands the TRV never
+    received: Zigbee2MQTT reports a command as applied as soon as it is sent.
+
+
+    **Needs** the patched Zigbee2MQTT schedule converter, where a day's
+    schedule is `HH:MM/eco` or `HH:MM/comfort` for exactly 6 slots, for example
+    `00:00/eco 06:00/comfort 08:00/eco 17:00/comfort 22:00/eco 22:01/eco`.
+
+
+    **Schedule helper:** comfort is the ON time. A day can have at most 3
+    comfort blocks, or 2 if neither starts at midnight nor ends at the end of
+    the day, because the TRV holds 6 slots a day and each day starts with a
+    00:00 one. A day with too many blocks is written without its last blocks,
+    and a warning is added to the Home Assistant log.
+
+
+    Unavailable window/door sensors count as closed, and an unavailable
+    outside temperature means no lockout change. Set the room's comfort, eco
+    and holiday (antifrost) temperatures on the TRV itself.
+  domain: automation
+  homeassistant:
+    min_version: 2024.10.0
+  input:
+    devices:
+      name: Room devices
+      icon: mdi:radiator
+      collapsed: false
+      input:
+        trv_device:
+          name: TRV
+          description: >-
+            The TRV's Zigbee2MQTT device. Its climate entity, local temperature
+            calibration number and schedule text entities (Monday to Sunday)
+            are found from it by name, so they must still end
+            `_local_temperature_calibration` and `_schedule_monday` (and so on),
+            as Zigbee2MQTT names them.
+          selector:
+            device:
+              multiple: false
+              filter:
+                - integration: mqtt
+        room_temperature_entity:
+          name: Room temperature sensor
+          description: Sensor that measures the true room temperature.
+          selector:
+            entity:
+              multiple: false
+              domain: sensor
+    control:
+      name: Schedule, presence and openings
+      icon: mdi:calendar-clock
+      collapsed: false
+      input:
+        schedule_entity:
+          name: Comfort schedule
+          description: Schedule helper. ON = comfort temperature, OFF = eco temperature.
+          selector:
+            entity:
+              multiple: false
+              domain: schedule
+        home_entity:
+          name: Home/Away
+          description: >-
+            Entity whose state is "home" when someone is home and "not_home"
+            when nobody is (for example group.home).
+          selector:
+            entity:
+              multiple: false
+              domain:
+                - group
+                - person
+        window_entities:
+          name: (Optional) Windows / doors
+          description: >-
+            Contact sensors (or groups of them). Any one "on" puts the room in
+            antifrost.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              domain:
+                - binary_sensor
+                - group
+    lockout:
+      name: (Optional) Outside temperature lockout
+      icon: mdi:weather-sunny
+      collapsed: true
+      input:
+        outside_temperature_entity:
+          name: Outside temperature sensor
+          description: >-
+            Leave empty to disable the lockout for this room. A smoothed value
+            such as a 24 hour mean (Statistics helper on your outside
+            temperature) avoids the room flapping on a sunny afternoon.
+          default: ""
+          selector:
+            entity:
+              multiple: false
+              domain: sensor
+        lockout_above:
+          name: Lockout above
+          description: >-
+            This room stays in antifrost while the outside temperature is
+            above this value.
+          default: 16
+          selector:
+            number:
+              min: 0
+              max: 30
+              step: 0.5
+              unit_of_measurement: "°C"
+              mode: box
+    advanced:
+      name: Advanced
+      icon: mdi:cog
+      collapsed: true
+      input:
+        offset_deadband:
+          name: Calibration deadband
+          description: >-
+            Only adjust the calibration when the TRV and room sensor differ by
+            at least this much.
+          default: 0.2
+          selector:
+            number:
+              min: 0.1
+              max: 2
+              step: 0.1
+              unit_of_measurement: "°C"
+              mode: box
+
+mode: queued
+max: 10
+max_exceeded: silent
+
+trigger_variables:
+  outside_sensor: !input outside_temperature_entity
+  outside_limit: !input lockout_above
+
+triggers:
+  - trigger: state
+    entity_id: !input home_entity
+  - trigger: state
+    entity_id: !input window_entities
+  - trigger: state
+    entity_id: !input schedule_entity
+    not_to:
+      - unavailable
+      - unknown
+    id: schedule
+  # The outside temperature lockout. Each of these fires when the sensor
+  # crosses the threshold. With no outside sensor both are always false.
+  - trigger: template
+    value_template: >-
+      {% set t = states(outside_sensor) | float(none) if outside_sensor else none %}
+      {{ t is number and t > outside_limit | float(99) }}
+  - trigger: template
+    value_template: >-
+      {% set t = states(outside_sensor) | float(none) if outside_sensor else none %}
+      {{ t is number and t <= outside_limit | float(99) }}
+  - trigger: time_pattern
+    minutes: /15
+    id: offset
+
+variables:
+  trv_device: !input trv_device
+  room_sensor: !input room_temperature_entity
+  schedule: !input schedule_entity
+  home: !input home_entity
+  windows: !input window_entities
+  outside: !input outside_temperature_entity
+  lockout_above: !input lockout_above
+  deadband: !input offset_deadband
+
+  # The TRV's entities, found from its device by the names Zigbee2MQTT gives them
+  device_ents: "{{ device_entities(trv_device) }}"
+  trv: "{{ device_ents | select('match', '^climate[.]') | first | default('', true) }}"
+  offset_number: "{{ device_ents | select('match', '^number[.].*_local_temperature_calibration$') | first | default('', true) }}"
+  monday_text: "{{ device_ents | select('match', '^text[.].*_schedule_monday$') | first | default('', true) }}"
+  missing: >-
+    {{ [('climate entity' if not trv), ('local temperature calibration number' if not offset_number),
+        ('Monday schedule text entity' if not monday_text)] | select('string') | list }}
+
+  trv_available: "{{ trv != '' and states(trv) not in ['unavailable', 'unknown'] }}"
+  trv_preset: "{{ state_attr(trv, 'preset_mode') }}"
+  away: "{{ is_state(home, 'not_home') }}"
+  any_open: "{{ expand(windows) | selectattr('state', 'eq', 'on') | list | count > 0 }}"
+  outside_temp: "{{ states(outside) | float(none) if outside else none }}"
+  locked_out: "{{ outside_temp is number and outside_temp > lockout_above | float(99) }}"
+  desired: "{{ 'antifrost' if (away or any_open or locked_out) else 'auto' }}"
+  # The schedule helper changing, or running the actions by hand (no trigger id)
+  reset: "{{ trigger.id | default('manual') in ['schedule', 'manual'] }}"
+  # Back in auto when the schedule helper changes (or the actions are run by
+  # hand); also when coming out of antifrost
+  needs_send: "{{ trv_preset != desired and (desired == 'antifrost' or trv_preset == 'antifrost' or reset) }}"
+  room_temp: "{{ states(room_sensor) | float(none) }}"
+  trv_temp: "{{ state_attr(trv, 'current_temperature') | float(none) }}"
+  offset_now: "{{ states(offset_number) | float(none) }}"
+
+actions:
+  - alias: Stop with an error if the TRV's entities cannot be found
+    if:
+      - condition: template
+        value_template: "{{ missing | count > 0 }}"
+    then:
+      - stop: "Room heating: cannot find the TRV's {{ missing | join(', ') }} from its device"
+        error: true
+
+  - alias: Do nothing while the TRV is offline
+    condition: template
+    value_template: "{{ trv_available }}"
+
+  - choose:
+      # Keep the TRV's temperature reading in line with the room sensor
+      - alias: Calibrate TRV to the room sensor
+        conditions:
+          - condition: trigger
+            id: offset
+        sequence:
+          - alias: Stop unless both readings are available and differ enough
+            condition: template
+            value_template: >-
+              {{ room_temp is number and trv_temp is number and offset_now is number
+                 and (room_temp - trv_temp) | abs >= deadband | float(0.5) }}
+          - action: number.set_value
+            target:
+              entity_id: "{{ offset_number }}"
+            data:
+              value: >-
+                {% set lo = state_attr(offset_number, 'min') | float(-10) %}
+                {% set hi = state_attr(offset_number, 'max') | float(10) %}
+                {{ ([[offset_now + room_temp - trv_temp, lo] | max, hi] | min) | round(1) }}
+
+    # Presence, windows, lockout and schedule changes
+    default:
+      - alias: Put the TRV in the right preset
+        if:
+          - condition: template
+            value_template: "{{ needs_send }}"
+        then:
+          - action: climate.set_preset_mode
+            target:
+              entity_id: "{{ trv }}"
+            data:
+              preset_mode: "{{ desired }}"
+
+      - alias: Stop unless the schedule is to be written
+        condition: template
+        value_template: "{{ reset }}"
+
+      - alias: Read the comfort schedule from the helper
+        action: schedule.get_schedule
+        target:
+          entity_id: !input schedule_entity
+        response_variable: schedule_response
+
+      # For each day: comfort blocks become comfort slots, and the end of each
+      # block an eco slot. Every day starts with a 00:00 slot (the TRV is in
+      # antifreeze before its first slot), blocks that touch are merged, and
+      # the list is padded to the 6 slots the TRV needs by repeating the last
+      # preset a minute later. If the day needs more than 6 slots the last
+      # blocks are dropped (never the closing eco slot), and the day is flagged
+      # in `over`.
+      - alias: Work out the schedule for each day
+        variables:
+          weekdays: [monday, tuesday, wednesday, thursday, friday, saturday, sunday]
+          plan: >-
+            {% set sched = schedule_response[schedule] if schedule in schedule_response else schedule_response %}
+            {% set out = namespace(days=[]) %}
+            {% for day in weekdays %}
+              {% set s = namespace(t=[], over=false) %}
+              {% for b in (sched[day] | default([], true) | sort(attribute='from')) %}
+                {% set f = ((b['from'] | string)[0:2] | int) * 60 + ((b['from'] | string)[3:5] | int) %}
+                {% set e = ((b['to'] | string)[0:2] | int) * 60 + ((b['to'] | string)[3:5] | int) %}
+                {% set e = 1440 if e >= 1439 else e %}
+                {% if s.t | count > 0 and f < s.t[-1][0] %}
+                  {% set f = s.t[-1][0] %}
+                {% endif %}
+                {% if e > f %}
+                  {% if s.t | count > 0 and s.t[-1][1] == 'eco' and s.t[-1][0] == f %}
+                    {% set s.t = s.t[:-1] %}
+                  {% else %}
+                    {% set s.t = s.t + [[f, 'comfort']] %}
+                  {% endif %}
+                  {% if e < 1440 %}
+                    {% set s.t = s.t + [[e, 'eco']] %}
+                  {% endif %}
+                {% endif %}
+              {% endfor %}
+              {% if s.t | count == 0 or s.t[0][0] != 0 %}
+                {% set s.t = [[0, 'eco']] + s.t %}
+              {% endif %}
+              {% for i in range(8) %}
+                {% if s.t | count > 6 %}
+                  {% set s.over = true %}
+                  {% set s.t = s.t[:-1] if s.t[-1][1] == 'comfort' else s.t[:-2] %}
+                {% endif %}
+              {% endfor %}
+              {% for i in range(6) %}
+                {% if s.t | count < 6 %}
+                  {% set s.t = s.t + [[[s.t[-1][0] + 1, 1439] | min, s.t[-1][1]]] %}
+                {% endif %}
+              {% endfor %}
+              {% set text = namespace(v=[]) %}
+              {% for x in s.t %}
+                {% set text.v = text.v + [ '%02d:%02d/%s' | format(x[0] // 60, x[0] % 60, x[1]) ] %}
+              {% endfor %}
+              {% set out.days = out.days + [{
+                   'entity': monday_text | replace('monday', day),
+                   'value': text.v | join(' '),
+                   'over': s.over,
+                   'day': day }] %}
+            {% endfor %}
+            {{ out.days }}
+
+      - alias: Write every day to the TRV
+        repeat:
+          for_each: "{{ plan }}"
+          sequence:
+            - alias: Write the day to the TRV
+              action: text.set_value
+              target:
+                entity_id: "{{ repeat.item.entity }}"
+              data:
+                value: "{{ repeat.item.value }}"
+              continue_on_error: true
+            - alias: Warn if the day had to be shortened
+              if:
+                - condition: template
+                  value_template: "{{ repeat.item.over }}"
+              then:
+                - action: system_log.write
+                  data:
+                    level: warning
+                    logger: homeassistant.components.blueprint.room_heating
+                    message: >-
+                      {{ repeat.item.entity }}: the schedule helper has more
+                      comfort blocks on {{ repeat.item.day }} than the TRV can
+                      hold (6 slots a day); the last ones were left out.
