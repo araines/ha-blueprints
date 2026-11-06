@@ -27,9 +27,13 @@ blueprint:
     helper are only reflected at the next schedule change, not immediately.
     To write the schedule straight away, run this automation's actions by hand.
 
-    - Every 15 minutes the TRV's local temperature calibration is nudged so
-    its reading matches the room sensor (skipped if either reading is
-    unavailable, or inside the deadband).
+    - Whenever the TRV's reading and the room sensor drift apart by the
+    deadband or more (a change in either one can do it), the TRV's local
+    temperature calibration is adjusted so its reading matches the room
+    sensor. The adjustment shows up in the TRV's reading straight away, so
+    this runs as soon as the gap opens. It does not retry if a write leaves
+    the gap open (for example when the calibration is at its limit); the
+    next run is when the gap closes and opens again.
 
     - The outside temperature lockout starts and ends the moment the outside
     sensor crosses the threshold.
@@ -172,6 +176,9 @@ max_exceeded: silent
 trigger_variables:
   outside_sensor: !input outside_temperature_entity
   outside_limit: !input lockout_above
+  trv_device_id: !input trv_device
+  room_sensor_id: !input room_temperature_entity
+  gap_limit: !input offset_deadband
 
 triggers:
   - trigger: state
@@ -194,8 +201,14 @@ triggers:
     value_template: >-
       {% set t = states(outside_sensor) | float(none) if outside_sensor else none %}
       {{ t is number and t <= outside_limit | float(99) }}
-  - trigger: time_pattern
-    minutes: /15
+  # Calibrate when the TRV's reading and the room sensor drift apart. This
+  # fires when the gap reaches the deadband; a write closes it again.
+  - trigger: template
+    value_template: >-
+      {% set trv = device_entities(trv_device_id) | select('match', '^climate[.]') | first | default('', true) %}
+      {% set room = states(room_sensor_id) | float(none) %}
+      {% set trv_now = state_attr(trv, 'current_temperature') | float(none) if trv else none %}
+      {{ room is number and trv_now is number and (room - trv_now) | abs >= gap_limit | float(0.5) }}
     id: offset
 
 variables:
